@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+
+This script analyses a pair of Ethica telemetry files
+against the coordiantor's linkage file and conducts a number
+of simple tests to verify the integrity of the data.
+
+This should be run prior to ingest, to be sure the data is reasonably
+complete and well-formed.
+
+Usage:
+  ethica_telemetry_verify [options] GPSCSV ACCELCSV 
+  ethica_telemetry_verify -h | --help | -V | --version
+
+Options:
+    -h            Display this help info
+    -L FNAME      Save log to FNAME
+    -t ID         Produce trace log of all decisions about user #ID
+    -v,--verbose  Provide more verbose output
+"""
+import os
+import re
+import csv
+import datetime
+from docopt import docopt
+from tqdm import tqdm
+
+try:
+    #db_name = 'interact_db'
+    db_host = os.environ["SQL_LOCAL_SERVER"]
+    db_host_port = int(os.environ["SQL_LOCAL_PORT"])
+    db_user = os.environ["SQL_USER"]
+    db_name = os.environ["SQL_DB"]
+    db_schema = os.environ["SQL_SCHEMA"]
+except KeyError as err:
+    print("A required runtime environment variable was not found.")
+    print(err)
+    print("Have you set up the run-time secrets?")
+    exit(1)
+
+# PREP
+# Ingest linkage tables into ethica_assignments
+#    possibly extend existing linkage loader
+#    otherwise write one specifically for ethica linkages
+
+# TESTS
+# Report ethids in Linkage that are missing iids
+# Report linkage iids missing from gps
+# Report linkage iids missing from accel
+# Does linkage have wear dates for Ethica? If so, validate them
+
+def verify_linkage_table():
+    """
+    Report all records in ethica linkage for which interact_id
+    is unassigned.
+    """
+
+    table_counts = {}
+    with psycopg2.connect(user=db_user,
+                        host=db_host,
+                        port=db_host_port,
+                        database=db_name) as conn:
+        unassigned = []
+        sql = """
+            SELECT ethica_id 
+                FROM portal_dev.ethica_assignments
+            WHERE interact_id IS NULL OR interact_id < 1;
+            """
+        c = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        c.execute(sql)
+        rows = c.fetchall()
+        for r in rows:
+            row = dict(r)
+            unassigned.append(row['interact_id'])
+    print(f"Found {len(unassigned)} users without IIDs.")
+
+
+
+if __name__ == '__main__':
+    args = docopt(__doc__, version='0.1.1')
+
+    gpsfname = args['GPSCSV']
+    accfname = args['ACCELCSV']
+
+    # if user has specified a log filename, use that instead 
+    # of the default
+    if args['-L']:
+        logfile = args['-L']
+
+    traceiid = ''
+    if args['-t']:
+        traceiid = args['-t']
+
+    def trace(curiid, msg):
+        if traceiid and curiid == traceiid:
+            print("TRACE %s: %s"%(traceiid,msg))
+
+    iids_with_missing_dates = []
+    with open(linkage_filename,'r',encoding='ISO-8859-1') as fcsv:
+        # sdpat = '^(?P<sdid>\d+)-(?P<fw>\d+)'
+        reader = csv.DictReader(fcsv,delimiter=',')
+        # shown = False
+        for rownum,row in enumerate(list(reader)):
+            # print(row.keys())
+            iid = row['interact_id']
+            if iid: 
+                # sdids = row['Sensedoc ID']
+                # this is technically the serial number, not an id
+                sdids = row['sensedoc_serial']
+                if '/' in sdids:
+                    log("Participant %s has multiple serial values (%s) in one record."%(iid,sdids))
+                    log("WARNING: Validation will continue, but linkage file cannot be ingested until this entry has been split into multiple rows.")
+                    trace(iid,"Slash found in sdid")
+                else:
+                    trace(iid,"No slash found in sdid")
+
+
+                for sdfw in sdids.split('/'):
+                    sdid = None
+                    if '-' in sdfw: # Mtl encoded them one way
+                        sdid,dum,fw = sdfw.strip().partition('-')
+                        trace(iid,"SDID encoded with -")
+                    elif '_' in sdfw: # Ssk encoded them differently
+                        dum,dum,sdid = sdfw.strip().partition('_')
+                        trace(iid,"SDID encoded with _")
+                    else:
+                        sdid = sdfw
+                        trace(iid,"SDID not encoded with - or _")
+                    if not sdid or sdid.lower() == 'na':
+                        trace(iid,"SDID not included")
+                    elif all(x in '0123456789' for x in sdid):
+                        sdid = str(int(sdid))
+                        trace(iid,"SDID is %s"%sdid)
+                        # if row['data_disposition'] == 'ingest':
+                        if 'data_disposition' in row.keys() \
+                        and 'ignore' in row['data_disposition']:
+                            trace(iid,"record marked 'ignore' in linkage")
+                            ignoring_dirs.append("%s_%s"%(iid,sdid))
+                            log("Ignoring folder for %s_%s: %s"%(iid,sdid,row['data_disposition']))
+                        else:
+                            foldername = "%s_%s"%(iid,sdid)
+                            trace(iid,"record not marked 'ignore' in linkage, so data folder %s is expected"%foldername)
+                            if not row['start_date'] or not row['end_date']:
+                                log("INCOMPLETE WEAR-DATE RECORD: %s"%foldername)
+                                iids_with_missing_dates.append(foldername)
+                            expected_dirs.append(foldername)
+                    else:
+                        msg = "Participant %s has illegal SD_ID: '%s'"%(iid,sdid)
+                        trace(iid,msg)
+                        log(msg)
+            else:
+                log("CSV row #%d has no iid"%rownum)
+
+    log("Expecting %d directories."%len(expected_dirs))
+    # print('\n'.join(expected_dirs))
+
+    count_found_dirs = 0
+    count_unfound_dirs = 0
+    for d in expected_dirs:
+        path = os.path.join(root_dir, d)
+        if os.path.isdir(path):
+            count_found_dirs += 1
+            # Now look in that expected dir and validate SDB fname
+            fnpat = "SD\d+fw\d+_\d+_\d+[^.]*\.[sS][dD][bB]"
+            for fn in os.listdir(path):
+                if fn.lower().endswith('.sdb'):
+                    prob = []
+                    m = re.search(fnpat,fn)
+                    if not m:
+                        log("  BAD SDB FNAME: %s"%os.path.join(path,fn))
+        else:
+            log("  EXPECTED DIRECTORY MISSING: '%s'" % path)
+            count_unfound_dirs += 1
+
+    # now look for unexpected directories
+    count_unexpected_dirs = 0
+    for child in os.listdir(root_dir):
+        if not child in expected_dirs and not child in ignoring_dirs:
+            for childf in os.listdir(os.path.join(root_dir,child)):
+                if childf.endswith('.sdb'):
+                    log("  DIRECTORY IS UNEXPECTED: '%s'" % child)
+                    count_unexpected_dirs += 1
+                    break
+
+    log("Found %d of the %d expected directories." % (count_found_dirs,len(expected_dirs)), screen=True)
+    log("%d are missing." % count_unfound_dirs, screen=True)
+    log("Found %d unexpected directories." % count_unexpected_dirs, screen=True)
+    log("Found %d data folders without wear-date records."%len(iids_with_missing_dates), screen=True)
