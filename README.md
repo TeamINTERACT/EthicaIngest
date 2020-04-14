@@ -11,8 +11,12 @@ The data validation and ingest process is a step-by-step procedure, broken down 
         each ethica user has corresponding interact_id in linkage csv
         each ethica user has well-formed wear-dates in linkage csv
         each ethica user has ingestible telemetry files in archive 
-        all ingestible telemetry files validate against checksum
         no ingestible telemetry files exist for unknown ethica users
+
+    verify_ethica_telemetry
+    - Validate pairs of telemetry CSV files against linkage expectations
+        - each file validates against checksum
+        - data in file matches wear dates in linkage
 
     create_ethica_assignments.sql
     - Create table psql portal_dev.ethica_assignments
