@@ -23,7 +23,7 @@ import os
 import re
 import sys
 import csv
-import datetime
+from datetime import datetime
 from docopt import docopt
 from loguru import logger as log
 from tqdm import tqdm
@@ -34,8 +34,8 @@ from tqdm import tqdm
 #    otherwise write one specifically for ethica linkages
 
 # TESTS
-# - Each ethica user has exactly one record
-# - Each ethica user has corresponding interact_id
+# X Each ethica user has exactly one record
+# X Each ethica user has corresponding interact_id
 # - Each ethica user has well-formed wear-dates
 
 # - Report linkage iids missing from gps
@@ -71,16 +71,49 @@ def validate_eid(idstr):
     """
     try:
         eid = int(idstr)
-    except ValueError:
+    except ValueError: # filter B
         log.info(f"Ethica ID '{idstr}' is not an integer.")
         return False
     global eids
-    if eid in eids:
+    if eid in eids: # filter A
         log.error(f"Redundant record for Ethica ID '{idstr}'.")
         return False
     eids.add(eid)
     return True
 
+def validate_wear_dates(row):
+    """
+    Given an Ethica record, ensure it has well-formed start and
+    end dates. Return True if so, False otherwise.
+                            DO NOT USE!
+    Wear dates are only valid for SenseDoc data. With SD, data
+    capture begins the moment the device is booted, so it captures
+    activity of the coordinator prior to delivery to the participant,
+    and then again after the device has been recovered. Wear dates
+    are used in that situation to filter out the coordinator data.
+    But Ethica data is different and has no coordinator "pollution"
+    that needs to be removed.
+
+    I'm leaving this code here though, with this comment, so that
+    nobody is tempted to add date filters back in at a later time.
+    """
+    return True
+    try:
+        start_str = row['start_date']
+        end_str = row['end_date']
+        start_date = datetime.strptime(start_str,"%Y-%m-%d") 
+        end_date = datetime.strptime(end_str,"%Y-%m-%d") 
+    except KeyError:
+        log.error(f"EID '{row['Ethica ID']}' has missing date field(s)")
+        return False
+    except ValueError:
+        log.error(f"EID '{row['Ethica ID']}' has missing/invalid date info {start_str} - {end_str}")
+        return False
+    if start_date >= end_date:
+        log.error(f"EID '{row['Ethica ID']}' has invalid date window {start_str} - {end_str}")
+        return False
+    log.critical(f"EID '{row['Ethica ID']}' has good date window {start_str} - {end_str}")
+    return True
 
 
 if __name__ == '__main__':
@@ -106,16 +139,16 @@ if __name__ == '__main__':
         reader = csv.DictReader(fcsv,delimiter=',')
         for rownum,row in enumerate(list(reader)):
             log.info(f"Reading CSV row {rownum}")
-            iid = row['interact_id']
-            if not iid: 
-                log.error(f"CSV row #{rownum} has no iid")
-                continue
-            validate_iid(iid)
             eid = row['Ethica ID']
             if not eid: 
                 log.info(f"CSV row #{rownum} has no eid")
                 continue # not an ethica row
-            validate_eid(eid)
+            if not validate_eid(eid):
+                continue # we're only interested in ethica users
+            iid = row['interact_id']
+            if not iid or not validate_iid(iid): # filter C 
+                log.error(f"Ethica user {eid} has no iid")
+    print(f"There were {len(eids)} apparent Ethica users in file.")
     exit(0)
 
     log.info("Expecting %d directories."%len(expected_dirs))
