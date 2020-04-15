@@ -3,20 +3,22 @@ Scripts and control files associated with ingesting Ethica data into the Interac
 
 This file is a placeholder that will eventually describe the assumptions and decisions made in modernizing the ingest prototype into the production pipeline.
 
-The data validation and ingest process is a step-by-step procedure, broken down into the following steps:
+The data validation and ingest process is a step-by-step procedure, broken down into the following modules:
 
     verify_ethica_linkage
     - Verify Ethica data files are ready to be ingested
-        each ethica user has exactly one record in linkage csv
-        each ethica user has corresponding interact_id in linkage csv
-        each ethica user has well-formed wear-dates in linkage csv
-        each ethica user has ingestible telemetry files in archive 
-        no ingestible telemetry files exist for unknown ethica users
+        a) each ethica user has exactly one record in linkage csv
+        b) each ethica user is a well-formed integer value
+        c) each ethica user has corresponding interact_id in linkage csv
+        d) each ethica user has ingestible telemetry files in archive 
+        e) no ingestible telemetry files exist for unknown ethica users
+
+        X) each ethica user has well-formed wear-dates in linkage csv
+            Nope! Wear dates have no meaning for Ethica users
 
     verify_ethica_telemetry
     - Validate pairs of telemetry CSV files against linkage expectations
         - each file validates against checksum
-        - data in file matches wear dates in linkage
 
     create_ethica_assignments.sql
     - Create table psql portal_dev.ethica_assignments

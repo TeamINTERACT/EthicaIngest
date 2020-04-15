@@ -6,12 +6,11 @@ This script analyses a coordinator's linkage table of Ethica
 user data and conducts a number of simple tests to verify the 
 integrity of the data, prior to ingest.
 
-
 This should be run prior to ingest, to be sure the data is reasonably
 complete and well-formed.
 
 Usage:
-  verify_ethica_linkage [options] LINKAGECSV TELEMETRY_DIR 
+  verify_ethica_linkage [options] LINKAGECSV GPSCSV ACCELCSV 
   verify_ethica_linkage -h | --help | -V | --version
 
 Options:
@@ -78,7 +77,9 @@ def validate_eid(idstr):
     if eid in eids: # filter A
         log.error(f"Redundant record for Ethica ID '{idstr}'.")
         return False
-    eids.add(eid)
+    eids.add(str(eid)) 
+    # we only converted to int to be sure the string was int-friendly
+    # all subsequent tests against id will be done as string compares
     return True
 
 def validate_wear_dates(row):
@@ -115,12 +116,39 @@ def validate_wear_dates(row):
     log.critical(f"EID '{row['Ethica ID']}' has good date window {start_str} - {end_str}")
     return True
 
+def get_possible_values_from_csv(filename, colname):
+    """
+    Given a CSV file and the name of a column,
+    return a list of all unique values in that column
+    """
+    values = set()
+    with open(filename,'r',encoding='ISO-8859-1') as fcsv:
+        reader = csv.DictReader(fcsv,delimiter=',')
+        for row in reader:
+            values.add(row[colname])
+    return values
+
+def detect_missing_values(master_values, csvfile, colname, streamname):
+    found_values = get_possible_values_from_csv(csvfile, colname)
+    missing_values = master_values - found_values
+    if missing_values: # filter D
+        log.error(f"{len(missing_values)} expected {colname} values missing from {streamname} data")
+        log.error(','.join([str(x) for x in list(missing_values)]))
+    else:
+        log.info(f"All expected {colname} values found for {streamname}")
+    unexpected_values = found_values - master_values
+    if unexpected_values: # filter E
+        log.error(f"{len(unexpected_values)} {colname} values in {streamname} data were unexpected:")
+        log.error(','.join([str(x) for x in list(unexpected_values)]))
+    else:
+        log.info(f"All values found for {colname} in {streamname} were expected")
 
 if __name__ == '__main__':
     args = docopt(__doc__, version='0.1.1')
 
     linkage_filename = args['LINKAGECSV']
-    telemetry_dir = args['TELEMETRY_DIR']
+    gps_filename = args['GPSCSV']
+    accel_filename = args['ACCELCSV']
 
     # replace default logger with something cleaner
     log.remove()
@@ -149,40 +177,8 @@ if __name__ == '__main__':
             if not iid or not validate_iid(iid): # filter C 
                 log.error(f"Ethica user {eid} has no iid")
     print(f"There were {len(eids)} apparent Ethica users in file.")
-    exit(0)
 
-    log.info("Expecting %d directories."%len(expected_dirs))
-    # print('\n'.join(expected_dirs))
+    detect_missing_values(eids, gps_filename, 'user_id', 'GPS')
+    detect_missing_values(eids, accel_filename, 'user_id', 'Accel')
 
-    count_found_dirs = 0
-    count_unfound_dirs = 0
-    for d in expected_dirs:
-        path = os.path.join(root_dir, d)
-        if os.path.isdir(path):
-            count_found_dirs += 1
-            # Now look in that expected dir and validate SDB fname
-            fnpat = "SD\d+fw\d+_\d+_\d+[^.]*\.[sS][dD][bB]"
-            for fn in os.listdir(path):
-                if fn.lower().endswith('.sdb'):
-                    prob = []
-                    m = re.search(fnpat,fn)
-                    if not m:
-                        log("  BAD SDB FNAME: %s"%os.path.join(path,fn))
-        else:
-            log("  EXPECTED DIRECTORY MISSING: '%s'" % path)
-            count_unfound_dirs += 1
-
-    # now look for unexpected directories
-    count_unexpected_dirs = 0
-    for child in os.listdir(root_dir):
-        if not child in expected_dirs and not child in ignoring_dirs:
-            for childf in os.listdir(os.path.join(root_dir,child)):
-                if childf.endswith('.sdb'):
-                    log("  DIRECTORY IS UNEXPECTED: '%s'" % child)
-                    count_unexpected_dirs += 1
-                    break
-
-    log("Found %d of the %d expected directories." % (count_found_dirs,len(expected_dirs)), screen=True)
-    log("%d are missing." % count_unfound_dirs, screen=True)
-    log("Found %d unexpected directories." % count_unexpected_dirs, screen=True)
-    log("Found %d data folders without wear-date records."%len(iids_with_missing_dates), screen=True)
+    print("Verification complete.")
