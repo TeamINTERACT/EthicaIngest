@@ -1,0 +1,7 @@
+SELECT count(1) as minute_codes_with_N_samples, N_samples FROM
+    (SELECT count(1) as N_samples, user_id, substring(satellite_time::text FROM 0 FOR 17) AS minute 
+    FROM level_0.tmpgps 
+    GROUP BY user_id, minute 
+    ORDER BY user_id, minute) as foo
+GROUP BY N_samples
+ORDER BY N_samples;
