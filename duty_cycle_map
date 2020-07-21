@@ -1,12 +1,16 @@
 #!/usr/bin/env python
+import matplotlib as mat
 import matplotlib.pyplot as plt
+import random as rnd
 import datetime
 import psycopg2
 import psycopg2.extras
 import re
 import os
 import seaborn
+import collections
 from loguru import logger as log
+import math
 
 """
 Draws a graph showing the distribution of timestamps relative to
@@ -51,17 +55,20 @@ def compute_spacing(timestamps):
     """
     Given a series of timestamps, return a list of ms offsets
     between successive entries in the series.
+    Assumes the timestamps are sorted in ascending order
     """
     last = None
-    ms_spaces = []
-    for this,val in timestamps:
+    minute_spaces = []
+    for this in timestamps:
         if this and last:
             interval = this - last
-            ms_spaces.append(interval.microseconds/1000)
+            # diff_ms = int(interval.total_seconds()*1000)
+            diff_s = interval.total_seconds()
+            minute_spaces.append( int(round(diff_s/60.0, 0)) )
         else:
-            ms_spaces.append(-1)
+            minute_spaces.append(-1)
         last = this
-    return ms_spaces
+    return minute_spaces
 
 
 log.info("Creating connection to DB...")
@@ -75,22 +82,27 @@ with psycopg2.connect(user=db_user,
     cur.execute(user_dc_signals_sql) #"SELECT DISTINCT user_id FROM level_0.tmpelemetrysskwbatterycsv;")
     all_signals = cur.fetchall()
     users = set([x['user_id'] for x in all_signals])
-    log.info(f"Unique users = {users}")
+    # log.info(f"Unique users = {users}")
 
-    numfigs = len(users)
-    # f = plt.figure(figsize=(12,2*numfigs))
-    f = plt.figure()
-    f.suptitle("Unconflicted Timestamps - GPS")
+    # numfigs = len(users)
+    numfigs = 1
+    numusers = 10
+    f, axs = plt.subplots(numusers,2,figsize=(16,4*numusers))
+    # f = plt.figure()
+    f.suptitle("Battery Duty Cycle Analysis")
 
-    for i,user in enumerate([6403,]): #users):
+    rnd.seed(17) # ensure same group of users chosen each time
+    for i,user in enumerate(rnd.sample(users,numusers)):
         log.info(f"Drawing signal spacing histogram...")
-        user_signals = [(x['record_time'],1) for x in all_signals if x['user_id'] == user]
+        user_signals = [x['record_time'] for x in all_signals if x['user_id'] == user]
         log.info(f"Found {len(user_signals)} signals for user {user}")
         user_spacings = compute_spacing(user_signals)
         log.info(f"Found {len(user_spacings)} spacings for user {user}")
 
-        log.info(f"Signals sample -> {user_signals[-5:]}")
-        log.info(f"Spacings sample -> {user_spacings[-5:]}")
+        # log.info(f"Signals sample -> {user_signals[-5:]}")
+        # log.info(f"Spacings sample -> {user_spacings[-5:]}")
+
+
 
         # print(f"Reading SQL data for user {user}...")
         # cur.execute(telemetry_sql%user)
@@ -119,13 +131,39 @@ with psycopg2.connect(user=db_user,
         # print(f"Now {len(full_collision_counts)} samples in full set.")
 
 
-        log.info(f"Generating plot...")
-        # ax = f.add_subplot(numfigs,1,i+1)
-        plt.plot(*zip(*user_signals))
-        # ax.set_ylabel(f"User {user}")
+        log.info(f"Generating plots...")
+
+        # plot histogram of offsets
+        bins = [0,1,2,3,4,5,6,7,8,9,10,100,1000,10000,100000]
+        axs[i,0].set_xscale('log')
+        axs[i,0].set_yscale('log')
+        axs[i,0].get_xaxis().get_major_formatter().labelOnlyBase = False
+        axs[i,0].hist(user_spacings[1:], bins=bins) # log=True)
+        axs[i,0].set_xlabel(f'Offset (minutes) for User {user}',fontsize=6)
+        axs[i,0].set_ylabel('Number of Occurrences',fontsize=6)
+        axs[i,0].tick_params(axis='both', which='major', labelsize=6)
+        axs[i,0].tick_params(axis='both', which='minor', labelsize=4)
+
+        # plot blue line graph with red plusses at data points
+        # drop the first sample, since it is known to have no prior time
+        # logarithmic vertical axis
+        # ax.set_ylabel(f"DC Signal Spacings for User {user}")
+        # axs[1] = f.add_subplot(212)
+        # axs[i,1].semilogy(user_signals[1:], user_spacings[1:], 
+        #          color='blue', linestyle='-', marker='+', linewidth=1) 
+        axs[i,1].bar(user_signals[1:], user_spacings[1:], width=0.5)
+        axs[i,1].set_xlabel(f'Timestamps for User {user}',fontsize=6)
+        axs[i,1].set_ylabel(f'Offset From Previous DC Start (minutes)',fontsize=6)
+        axs[i,1].tick_params(axis='both', which='major', labelsize=6)
+        axs[i,1].tick_params(axis='both', which='minor', labelsize=4)
+
+
+
+        # ax.plot(*zip(*user_signals))
+        # ax.set_ylabel(f"DC Signal Spacings for User {user}")
         # df.plot(figsize=(12,3))
         # fname = f"plot-{user}.png"
         # print(f"Saving {fname}...")
-    fname = "spacings.png"
-    f.savefig(fname,dpi=150)
+    fname = "offset-hist.png"
+    f.savefig(fname,dpi=100)
     log.info(f"Done. Image in {fname}")
