@@ -6,7 +6,7 @@ This file is a placeholder that will eventually describe the assumptions and dec
 The data validation and ingest process is a step-by-step procedure, broken down into the following modules:
 
     verify_ethica_linkage
-    - Verify Ethica data files are ready to be ingested
+    X Verify Ethica data files are ready to be ingested
         a) each ethica user has exactly one record in linkage csv
         b) each ethica user is a well-formed integer value
         c) each ethica user has corresponding interact_id in linkage csv
@@ -19,6 +19,10 @@ The data validation and ingest process is a step-by-step procedure, broken down 
     verify_ethica_telemetry
     - Validate pairs of telemetry CSV files against linkage expectations
         - each file validates against checksum
+        CURRENTLY NOT SURE THIS STEP IS NEEDED
+        the linkage verify already validates these files in some degree
+        should be able to add checksum test there rather than create
+        an entirely separate step in the cycle
 
     create_ethica_assignments.sql
     - Create table psql portal_dev.ethica_assignments

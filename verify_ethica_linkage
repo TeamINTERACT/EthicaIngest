@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-
 This script analyses a coordinator's linkage table of Ethica
 user data and conducts a number of simple tests to verify the 
 integrity of the data, prior to ingest.
 
 This should be run prior to ingest, to be sure the data is reasonably
 complete and well-formed.
+
+NOTE: It does NOT actually ingest the linkage table.
 
 Usage:
   verify_ethica_linkage [options] LINKAGECSV GPSCSV ACCELCSV 
@@ -36,15 +37,25 @@ from tqdm import tqdm
 # X Each ethica user has exactly one record
 # X Each ethica user has corresponding interact_id
 # - Each ethica user has well-formed wear-dates
+#    WRONG: wear dates don't apply to Ethica users 
+#           They are only tracked for SD users, so that
+#           movements of the coordinator before/after SD 
+#           delivery can be filtered out. Since we presume
+#           that only the registered user will carry the phone,
+#           there is no "stranger data" to be removed.
 
-# - Report linkage iids missing from gps
-# - Report linkage iids missing from accel
+# X Report linkage iids missing from gps
+# X Report linkage iids missing from accel
 # - Does linkage have wear dates for Ethica? If so, validate them
 # -     each ethica user has ingestible telemetry files in archive
 # -     no ingestible telemetry files exist for unknown ethica users
 
 iids = set([])
 eids = set([])
+
+# In one city, the linkage encode ethica id as 'Ethica ID'
+# In another, it is encoded as 'ethica_id'
+# We may want to make that column name an input parameter
 
 def validate_iid(idstr):
     """
@@ -63,10 +74,11 @@ def validate_iid(idstr):
     iids.add(iid)
     return True
 
+
 def validate_eid(idstr):
     """
     Given an Ethica ID in string form, ensure it's well formed and
-    unique.  Return True if so, False otherwise.
+    unique. Return True if so, False otherwise.
     """
     try:
         eid = int(idstr)
@@ -81,6 +93,7 @@ def validate_eid(idstr):
     # we only converted to int to be sure the string was int-friendly
     # all subsequent tests against id will be done as string compares
     return True
+
 
 def validate_wear_dates(row):
     """
@@ -105,16 +118,17 @@ def validate_wear_dates(row):
         start_date = datetime.strptime(start_str,"%Y-%m-%d") 
         end_date = datetime.strptime(end_str,"%Y-%m-%d") 
     except KeyError:
-        log.error(f"EID '{row['Ethica ID']}' has missing date field(s)")
+        log.error(f"EID '{row['ethica_id']}' has missing date field(s)")
         return False
     except ValueError:
-        log.error(f"EID '{row['Ethica ID']}' has missing/invalid date info {start_str} - {end_str}")
+        log.error(f"EID '{row['ethica_id']}' has missing/invalid date info {start_str} - {end_str}")
         return False
     if start_date >= end_date:
-        log.error(f"EID '{row['Ethica ID']}' has invalid date window {start_str} - {end_str}")
+        log.error(f"EID '{row['ethica_id']}' has invalid date window {start_str} - {end_str}")
         return False
-    log.critical(f"EID '{row['Ethica ID']}' has good date window {start_str} - {end_str}")
+    log.critical(f"EID '{row['ethica_id']}' has good date window {start_str} - {end_str}")
     return True
+
 
 def get_possible_values_from_csv(filename, colname):
     """
@@ -122,26 +136,41 @@ def get_possible_values_from_csv(filename, colname):
     return a list of all unique values in that column
     """
     values = set()
+    # To show a helpul progress bar, we have to know how many
+    # lines need to be processed, so we need to traverse the file
+    # twice. This might seem like overkill, but the data files are
+    # pretty big and can take hours to process. Showing signs of
+    # life on the console while the script is churning away silently
+    # in the background can be very reassuring.
+    log.info(f"Scanning file: {filename}")
+    nlines = sum(1 for x in open(filename))
     with open(filename,'r',encoding='ISO-8859-1') as fcsv:
         reader = csv.DictReader(fcsv,delimiter=',')
-        for row in reader:
+        for row in tqdm(reader, total=nlines):
             values.add(row[colname])
     return values
 
+
 def detect_missing_values(master_values, csvfile, colname, streamname):
+    """
+    Compare the values in a particular column of a CSV against a
+    master list of expected values and report values in the CSV
+    that do not match the expectation.
+    """
     found_values = get_possible_values_from_csv(csvfile, colname)
     missing_values = master_values - found_values
     if missing_values: # filter D
         log.error(f"{len(missing_values)} expected {colname} values missing from {streamname} data")
-        log.error(','.join([str(x) for x in list(missing_values)]))
+        log.error(','.join([str(x) for x in sorted(list(missing_values))]))
     else:
         log.info(f"All expected {colname} values found for {streamname}")
     unexpected_values = found_values - master_values
     if unexpected_values: # filter E
         log.error(f"{len(unexpected_values)} {colname} values in {streamname} data were unexpected:")
-        log.error(','.join([str(x) for x in list(unexpected_values)]))
+        log.error(','.join([str(x) for x in sorted(list(unexpected_values))]))
     else:
         log.info(f"All values found for {colname} in {streamname} were expected")
+
 
 if __name__ == '__main__':
     args = docopt(__doc__, version='0.1.1')
@@ -159,15 +188,20 @@ if __name__ == '__main__':
             colorize=True,
             format="<lvl>{level}</lvl>|{message}",
             level="WARNING")
-    log.add("Logs/verify_linkage_{time}.log", 
+    log.add("verify_linkage_{time}.log", 
             format="<lvl>{level}</lvl>|{message}",
             level=loglevel)
+    log.info(f"Execution directory: {os.getcwd()}")
+    log.info(f"Command line args: {args}")
 
+    # parse the linkage file and validate key data fields
     with open(linkage_filename,'r',encoding='ISO-8859-1') as fcsv:
         reader = csv.DictReader(fcsv,delimiter=',')
+        # optimization, should probably reduce eid values to set
+        # of unique strings first and then validate those
         for rownum,row in enumerate(list(reader)):
             log.info(f"Reading CSV row {rownum}")
-            eid = row['Ethica ID']
+            eid = row['ethica_id']
             if not eid: 
                 log.info(f"CSV row #{rownum} has no eid")
                 continue # not an ethica row
@@ -176,9 +210,10 @@ if __name__ == '__main__':
             iid = row['interact_id']
             if not iid or not validate_iid(iid): # filter C 
                 log.error(f"Ethica user {eid} has no iid")
-    print(f"There were {len(eids)} apparent Ethica users in file.")
+    log.info(f"There were {len(eids)} Ethica users mentioned in linkage file.")
 
+    # find and report abnormalities in the data
     detect_missing_values(eids, gps_filename, 'user_id', 'GPS')
     detect_missing_values(eids, accel_filename, 'user_id', 'Accel')
 
-    print("Verification complete.")
+    log.info("Verification complete.")

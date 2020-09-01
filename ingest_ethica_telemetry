@@ -1,0 +1,484 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Assuming that the linkage and telemetry data has been
+verified, now comes the part where we read those files
+into the tables.
+
+Note that linkage files are a trifle problematic. In the old
+data pipeline, linkage information was provided in a CSV file
+and had to be ingested manually. In the new system, linkage
+information is maintained by the back-end Harmonizer system,
+which links Ethica IDs to Interact/Treksoft ids by querying
+both partner servers.
+
+As a result, linkage CSV files are being phased out, but during
+the interim, some data may be duplicated between the two systems.
+
+For the sake of completeness, this ingestor can work with either
+system. If a LINKAGECSV is provided, it will be ingested, and its
+contents will be used to update any existing linkage records
+already in the ethica_assignments table. If no LINKAGECSV is
+provided, the ethica_assignments table will be used as definitive
+and will be assumed to have already been validated.
+
+Usage:
+  ingest_ethica_telemetry [options] LINKAGECSV GPSCSV ACCELCSV BATTCSV CITYID WAVEID
+  ingest_ethica_telemetry [options] GPSCSV ACCELCSV BATTCSV CITYID WAVEID
+  ingest_ethica_telemetry -h | --help | -V | --version
+
+Options:
+    -h            Display this help info
+    -L FNAME      Save log to FNAME
+    -t ID         Produce trace in log of all decisions about user #ID
+    -e COLNAME    Use COLNAME as name of EthicaID field (def: ethica_id) 
+    -i COLNAME    Use COLNAME as name of InteractID field (def: interact_id) 
+    -m COLNAME    Use COLNAME as name of Email field (def: email) 
+    -s COLNAME    Use COLNAME as name of StartDate field (def: start_date)
+    -v,--verbose  Provide more verbose output
+"""
+import os
+import re
+import csv
+import sys
+import datetime
+import psycopg2
+import subprocess as sub
+from docopt import docopt
+from loguru import logger as log
+from tqdm import tqdm
+
+try:
+    db_host = os.environ["SQL_LOCAL_SERVER"]
+    db_host_port = int(os.environ["SQL_LOCAL_PORT"])
+    db_user = os.environ["SQL_USER"]
+    db_name = os.environ["SQL_DB"]
+    db_schema = os.environ["SQL_SCHEMA"]
+except KeyError as err:
+    print("A required runtime environment variable was not found.")
+    print(err)
+    print("Have you set up the run-time secrets?")
+    exit(1)
+
+# STEPS
+#    Ingest the linkage table
+#    Ingest the GPS telemetry
+#    Ingest the Accel telemetry
+#    Ingest the Battery telemetry
+
+# TESTS
+#    Confirm number of users with new data in table equals number expected
+#    Confirm number of new data rows in table equals number expected
+
+def verify_linkage_table():
+    """
+    Report all records in ethica linkage for which interact_id
+    is unassigned.
+    """
+
+    table_counts = {}
+    with psycopg2.connect(user=db_user,
+                        host=db_host,
+                        port=db_host_port,
+                        database=db_name) as conn:
+        unassigned = []
+        sql = """
+            SELECT ethica_id 
+                FROM portal_dev.ethica_assignments
+            WHERE interact_id IS NULL OR interact_id < 1;
+            """
+        c = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        c.execute(sql)
+        rows = c.fetchall()
+        for r in rows:
+            row = dict(r)
+            unassigned.append(row['interact_id'])
+    log.info(f"Found {len(unassigned)} users without IIDs.")
+
+
+
+if __name__ == '__main__':
+    args = docopt(__doc__, version='0.1.1')
+
+    loglevel = "INFO"
+    gpsfname = args['GPSCSV']
+    accfname = args['ACCELCSV']
+    battfname = args['BATTCSV']
+    linkagefname = args['LINKAGECSV']
+    cityid = args['CITYID']
+    waveid = args['WAVEID']
+
+    # process start-time params
+    logfilename = "ethica_ingest_{time}.log"  #pat will be completed by loguru later
+    if args['-L']:
+        logfilename = args['-L']
+
+    traceiid = ''
+    if args['-t']:
+        loglevel = "DEBUG"
+        traceiid = args['-t']
+
+    iidcol = 'interact_id'
+    if args['-i']:
+        iidcol = args['-i']
+    emailcol = 'email'
+    if args['-m']:
+        emailcol = args['-m']
+    eidcol = 'ethica_id'
+    if args['-e']:
+        eidcol = args['-e']
+    startcol = 'start_date'
+    if args['-s']:
+        startcol = args['-s']
+
+    # replace default logger with something cleaner
+    log.remove()
+    if args['--verbose']:
+        loglevel = "DEBUG"
+    log.add(sys.stderr, 
+            colorize=True,
+            format="<lvl>{level}</lvl>|{message}",
+            level="INFO")
+    log.add(logfilename, 
+            format="<lvl>{level}</lvl>|{message}",
+            level=loglevel)
+    log.info(f"Execution directory: {os.getcwd()}")
+    log.info(f"Command line args: {args}")
+
+    # In a nutshell, here's what we're going to do:
+    #
+    # connect to db
+    # begin transaction for linkage
+    #     load telemetry data
+    # close/commit telemetry
+
+    # begin transaction for telemetry
+    # for each of gps and accel files:
+    #     create the temp table to recv raw data
+    #     load the csv into the temp table
+    #     construct the transfusion SQL statement
+    #     execute the data transfusion
+    #     drop the temp table
+    #     perform basic table validation
+    #        log and abort if problems found
+    # close/commit the transaction if no problems found
+
+    # connect to db
+    log.info("Making connection to the DB")
+    with psycopg2.connect(user=db_user,
+                          host=db_host,
+                          port=db_host_port,
+                          database=db_name) as conn:
+
+        c = conn.cursor()
+
+        # Gather the linkage info needed to ingest the telemetry data
+        # This is all sensedoc-related, meaning that the code is to
+        # be adapted from the sensedoc ingestor, but that work has
+        # not yet been done.
+        if linkagefname and False: #disabling temporarily for debug purposes
+            """
+            The objective of this section of code is to simply load
+            the rows of the linkage file into memory, normalize
+            them, performa a few basic idiot tests, and then shove them into the 
+            ethica_assignments table.
+            """
+
+            # we'll insert the record into the assignments table,
+            # using city and wave ids to populate the study_id
+            # field via lookup from the ethica_studies table.
+            studyid_lookup_sql = """
+                SELECT study_id FROM portal_dev.ethica_studies
+                WHERE city = {city} and wave = {wave};
+                """.format(city=cityid, wave=waveid)
+            c.execute(studyid_lookup_sql)
+            if c.rowcount == 1:
+                studyid = c.fetchone()[0]
+                log.info(f"City {cityid} Wave {waveid} successfully resolved to study #{studyid}. Ingest continues...")
+            elif c.rowcount > 1:
+                log.error(f"City {cityid} Wave {waveid} resolved to multiple Ethica studies. Note sure how to handle that. Ingest halting until code can be expanded to handle this case.")
+                sys.exit(0)
+            else:
+                log.error(f"There is no Ethica study on record for city {cityid} and wave {waveid}. Run this again when the appropriate record has been added to portal_dev.ethica_studies.")
+                sys.exit(0)
+
+            linkage_sql = """
+                INSERT INTO portal_dev.ethica_assignments (
+                    ethica_id, study_id, interact_id, ethica_email,
+                    start_date, end_date, 
+                    -- submitted_at_gap_start, expired_at_gap_end,
+                    -- account_status, low_notifications, low_adherence,
+                    relayed_to_treksoft)
+                    VALUES (%s,%s,%s,%s,%s,%s,True);
+                    """
+            
+            # there is no reliable source for end_date with
+            # Ethica records. In the interest of providing a
+            # boundary date that is reasonably sure to not 
+            # truncate user data, we will use the date of ingest.
+            end_date = datetime.datetime.now().strftime("%Y-%m-%d")
+
+            with open(linkagefname,'r',encoding='ISO-8859-1') as fcsv:
+                reader = csv.DictReader(fcsv,delimiter=',')
+                clean = True
+                c.execute("BEGIN;")
+                for rownum,row in enumerate(list(reader)):
+                    # log.debug(row.keys())
+                    iid = row[iidcol].strip()
+                    if iid: 
+                        # log.info(row.keys())
+                        eid = row[eidcol].strip()
+                        email = row[emailcol].strip()
+                        try:
+                            revdate = datetime.datetime.strptime(row[startcol].strip(),'%d-%m-%Y')
+                            startdate = revdate.strftime("%Y-%m-%d")
+                        except Exception as e:
+                            log.info("Invalid date format found.  Skipping record.")
+                            log.debug(e)
+                            startdate = ''
+                        if eid and email and startdate:
+                            if not eid.isnumeric():
+                                log.warning(f"Participant {iid} has malformed Ethica ID '{eid}'.")
+                                log.warning("Validation will continue, but linkage file cannot be ingested until this entry has been fixed.")
+                                clean = False
+                            else: # eid appears good
+                                if clean: # we're still actually ingesting
+                                    if 'data_disposition' in row.keys() \
+                                    and 'ignore' in row['data_disposition']:
+                                        log.info(f"Ignoring record for {iid}/{eid}, as instructed")
+                                    else:
+                                        log.info(f"Ingesting record for user {iid}/{eid}")
+                                        c.execute(linkage_sql, (eid, studyid, iid,
+                                                                email, startdate,
+                                                                end_date))
+                                        if c.rowcount == 1:
+                                            log.debug("Row ingest successful.")
+                                        else:
+                                            log.warning(f"Row ingest failed with SQL: {c.query}")
+                                else:
+                                    log.info("Skipping actual ingest due to prior problems")
+                        else:
+                            log.debug(f"Ignoring participant {iid} who is missing 1 or more Ethica fields")
+                    else:
+                        log.warning(f"CSV row #{rownum} has no iid")
+                if clean:
+                    c.execute("COMMIT;")
+                    log.info("All users loaded successfully. Linkage changes committed.")
+                else:
+                    c.execute("ROLLBACK;")
+                    log.info("Somebody didn't load successfully.  Linkage changes rolling back.")
+            log.info("Linkage data loaded. Proceeding with ingest.")
+
+        """
+        I want to use the psql COPY command, since it has been
+        optimized for fast loading, but the telemetry file has
+        different column names than the fields the data is being
+        loaded into. I *COULD* just rename the columns in the data
+        file, but that's a manual step that I'd prefer not to embed 
+        in the process.
+
+        It would have been nice to suck the CSV directly into the
+        target table, since that would be fastest, but the data needs
+        to be massaged a bit on the way in. We need to replace the
+        ethica user_id with the interact_id, by some lookup method,
+        and we also have to guard against duplicate timestamps.
+
+        So I'll have to load the CSV into a temp table first and
+        then suck those lines into the final table.
+        """
+
+        datafilenames = {'gps':gpsfname, 'accel':accfname, 'batt':battfname}
+
+        create_tmp_sql = {'gps':f"""
+                DROP TABLE IF EXISTS {db_schema}.%s; 
+                CREATE TABLE {db_schema}.%s (
+                    user_id BIGINT NOT NULL,
+                    date TEXT,
+                    device_id TEXT NOT NULL,
+                    record_time TIMESTAMP WITH TIME ZONE NOT NULL,
+                    timestamp TEXT,
+                    accu DOUBLE PRECISION,
+                    alt DOUBLE PRECISION,
+                    bearing DOUBLE PRECISION,
+                    lat DOUBLE PRECISION NOT NULL,
+                    lon DOUBLE PRECISION NOT NULL,
+                    provider TEXT,
+                    satellite_time TIMESTAMP WITH TIME ZONE,
+                    speed DOUBLE PRECISION
+                    );
+                    """,
+
+                'accel':f"""
+                DROP TABLE IF EXISTS {db_schema}.%s; 
+                CREATE TABLE {db_schema}.%s (
+                    user_id BIGINT NOT NULL,
+                    date TEXT,
+                    device_id TEXT NOT NULL,
+                    record_time TIMESTAMP WITH TIME ZONE NOT NULL,
+                    timestamp TEXT,
+                    accu DOUBLE PRECISION,
+                    x_axis DOUBLE PRECISION NOT NULL,
+                    y_axis DOUBLE PRECISION NOT NULL,
+                    z_axis DOUBLE PRECISION NOT NULL
+                    );
+                    """,
+
+                'batt':f"""
+                DROP TABLE IF EXISTS {db_schema}.%s; 
+                CREATE TABLE {db_schema}.%s (
+                    user_id BIGINT NOT NULL,
+                    date TEXT,
+                    device_id TEXT NOT NULL,
+                    record_time TIMESTAMP WITH TIME ZONE NOT NULL,
+                    timestamp TEXT,
+                    level INT NOT NULL, -- 0-100 battery percentage
+                    plugged INT NOT NULL, -- 0-4
+                    scale INT NOT NULL,  -- 100
+                    status INT NOT NULL, -- 0-5
+                    temperature INT NOT NULL, -- 0-525 (degrees F?)
+                    voltage INT NOT NULL -- 0-4476
+                    );
+                    """,}
+
+        def stripfname(fname):
+            return ''.join([x for x in fname if x in 'abcdefghijklmnopqrstuvwxyz'])
+
+        # first, load the raw data into temp tables
+        # for each of gps, accel and battery files:
+        clean = True
+        if True: # turn on/off for testing just the transfusion part further down
+            #for telemtype in ['gps', 'accel', 'batt']:
+            for telemtype in ['batt']:
+                # load the csv into the temp table
+                srcfile = datafilenames[telemtype]
+
+                # create the temp table to recv raw data
+                #tmptablename = f"tmp{telemtype}"
+                tmptablename = f"tmp{stripfname(srcfile)}"
+                create_sql = create_tmp_sql[telemtype]%(tmptablename,tmptablename)
+                # c.execute(create_sql%tmptablename)
+
+                ingest_sql = f"""{create_sql}; 
+                                 COPY {db_schema}.{tmptablename} FROM STDIN 
+                                 WITH CSV HEADER DELIMITER ',';
+                                 """
+                # Now construct the command line
+                # First, tell sqlite where the temp directory is
+                cmdline = 'SQLITE_TMPDIR=~/scratch '
+                # Then load the raw data into a temp table via STDIN
+                cmdline += f'cat {srcfile} | psql {db_name} -q -c "{ingest_sql}"'
+
+                log.info(f"Creating tmp table for {telemtype}")
+                log.debug(f"Shell cmd: {cmdline}")
+                res = sub.call(cmdline, shell=True)
+                if res:
+                    # If table load fails, log the failure
+                    log.warning(f"Ingesting file '{srcfile}' failed with return code {res}")
+                    clean = False
+                    break
+
+                # confirm line counts of ingested tables
+                with open(srcfile,'r') as fh:
+                    # the readlines() method fails due to memory issues
+                    # filerows = len(fh.readlines())
+                    filerows = 0
+                    for line in fh:
+                        filerows += 1
+                    sql = f"SELECT count(1) FROM {db_schema}.{tmptablename};"
+                    c.execute(sql)
+                    result = c.fetchone()
+                    tablerows = result[0]
+                    if filerows == tablerows+1: #csv file has a header row
+                        log.info("Ingested row count matches source file.")
+                    else:
+                        log.warning("Ingested row count doesn't match source file.")
+                        clean = False
+
+                log.info(f"File '{srcfile}' ingested cleanly")
+
+        transfusion_sql = {'accel': """
+                    INSERT INTO eth_accel (iid,ts,x,y,z)
+                    SELECT asgn.interact_id,
+                        raw.record_time,
+                        raw.x_axis,
+                        raw.y_axis,
+                        raw.z_axis
+                    FROM %s raw 
+                        INNER JOIN portal_dev.ethica_assignments asgn
+                        ON raw.user_id = asgn.ethica_id
+                    ON CONFLICT (iid, ts) DO NOTHING;
+                            """,
+                'gps':  """
+                    INSERT INTO eth_gps (iid,ts,lat,lon,speed,course,alt,accu,provider)
+                        SELECT asgn.interact_id,
+                                raw.satellite_time, -- record_time is highly unstable
+                                raw.lat,
+                                raw.lon,
+                                raw.speed,
+                                raw.bearing,
+                                raw.alt,
+                                raw.accu,
+                                raw.provider
+                        FROM %s raw 
+                            INNER JOIN portal_dev.ethica_assignments asgn
+                            ON raw.user_id = asgn.ethica_id
+                        ON CONFLICT (iid, ts) DO NOTHING;
+                            """,}
+
+        # proceed if files loaded successfully
+        # transfuse the data from tmp to production table,
+        # filtering redundancies
+        if clean and False: #disabling temporarily for debug purposes
+            # begin transaction
+            c.execute("SET SCHEMA '%s';"%db_schema)
+            c.execute("BEGIN;")
+
+            # for each of gps and accel files:
+            for telemtype in ['gps', 'accel']:
+                tmptablename = f"tmp{telemtype}"
+
+                # Record the record count of the src and target
+                # tables, so we can compare after ingest for
+                # verification purposes
+                tmpcountsql = f"SELECT count(1) FROM {tmptablename};"
+                c.execute(tmpcountsql)
+                tmp_rowcount = c.fetchone()[0]
+                log.info(f"Rowcount for {tmptablename} before transfusion is {tmp_rowcount}")
+                trgcountsql = f"SELECT count(1) FROM eth_{telemtype};"
+                c.execute(trgcountsql)
+                trg_rowcount = c.fetchone()[0]
+                log.info(f"Rowcount for eth_{telemtype} before transfusion is {trg_rowcount}")
+               
+                # construct the transfusion SQL statement
+                # ensuring only one record for each timestamp
+                # and then execute the data transfusion
+                sql = transfusion_sql[telemtype] % tmptablename
+                log.debug(f"Tranfusion SQL: {sql}")
+                c.execute(sql)
+
+                # drop the temp table
+                # disabling this until debugging is completed
+                # so I can examine the contents post-mortem
+                # c.execute(f"DROP TABLE {tmptablename};")
+
+                # perform basic table validation
+                # log and abort if problems found
+                c.execute(trgcountsql)
+                trg_rowcount_after = c.fetchone()[0]
+                kept = trg_rowcount_after - trg_rowcount
+                log.info(f"Kept {100*kept/float(tmp_rowcount):0.1f}% of the source rows")
+                if kept < 0.95 * tmp_rowcount:
+                    log.warning(f"Expecting up to {tmp_rowcount} new rows in eth_{telemtype} but only got {kept}")
+                    # clean = False
+                    # break
+                else:
+                    log.info(f"Found {kept} new rows in eth_{telemtype}, which is within tolerances of expected max ({tmp_rowcount})")
+
+            # close/commit the transaction if no problems found
+            if clean:
+                c.execute("COMMIT;")
+                log.info("All files loaded successfully.  Transaction committed.")
+            else:
+                c.execute("ROLLBACK;")
+                log.info("Something didn't load successfully.  Transaction rolling back.")
+
