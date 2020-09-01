@@ -1,0 +1,7 @@
+#!/bin/bash
+#SBATCH --account=def-dfuller
+#SBATCH --job-name=sniff-conflict-vic-w1-gps
+#SBATCH --output=conflict-report-vic-w1-gps.out
+#SBATCH --time=00:30:00
+#SBATCH --mem=40G
+./bloat_survey Telemetry/vic-w1-gps.csv 

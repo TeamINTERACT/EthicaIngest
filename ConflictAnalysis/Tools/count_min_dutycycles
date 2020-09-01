@@ -1,0 +1,28 @@
+#!/usr/bin/env python
+import pandas as pd
+
+users = []
+goods = []
+totals = []
+raws = []
+rates = []
+records = {}
+with open('Outputs/duty_cycle_keep_rates.csv', 'r') as fh:
+    for i,line in enumerate(fh.readlines()):
+        if i:
+            u,g,r= [x.strip() for x in line.split(',')]
+            user = int(u)
+            raw = int(g)
+            good = float(r)
+            users.append(user)
+            raws.append(raw)
+            goods.append(good)
+            records[user] = (raw,good)
+print(f"Found data for {len(users)} participants")
+print("\nMinThreshold,NumUsersKept,KeepPercent")
+for thresh in range(0,9000,500):
+    numkeepers = len([x for x in goods if x >= thresh])
+    print(f"{thresh},{numkeepers},{100*numkeepers/153.0:0.1f}")
+
+filter_rate = float(sum(goods))/sum(raws)
+print(f"Average retention: {100*filter_rate:0.1f}%")

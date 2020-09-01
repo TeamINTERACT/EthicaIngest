@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Usage:
+  bloat_survey [options] CSVFILE
+  bloat_survey -h | --help | -V | --version
+
+Options:
+    -h            Display this help info
+    -v,--verbose  Provide more verbose output
+"""
+import os
+import re
+import csv
+import sys
+import datetime
+import statistics as stats
+from docopt import docopt
+from loguru import logger as log
+from tqdm import tqdm
+
+def number_profile(values):
+    """
+    Given a list of numerical values, compute some basic stats on them.
+    """
+    minv = min(values)
+    maxv = max(values)
+    avgv = stats.mean(values)
+    medv = stats.median(values)
+    return minv,medv,avgv,maxv
+
+def assess_gps_file(fname, datafields):
+    """
+    Load a CSV file and scan it for bloat signals.
+    """
+    record_times_count = {}
+    satellite_times_count = {}
+    record_unique_datavalues_per_timestamp = {}
+    satellite_unique_datavalues_per_timestamp = {}
+
+    # linecount = -1
+    # with open(fname,'r') as fh:
+    #     for i,line in enumerate(fh):
+    #         pass
+    #     linecount = i+1
+
+    with open(fname, 'r') as fcsv:
+        reader = csv.DictReader(fcsv,delimiter=',')
+        # for row in tqdm(reader,total=linecount):
+        for row in reader:
+            user = row['user_id']
+            rec_time = row['record_time']
+            sat_time = row['satellite_time']
+            rkey = (user,rec_time)
+            skey = (user,sat_time)
+            record_times_count[rkey] = record_times_count.get(rkey, 0) + 1
+            satellite_times_count[skey] = satellite_times_count.get(skey, 0) + 1
+
+            # also keep a list of unique datavalues assigned to each timestamp
+            if not rkey in record_unique_datavalues_per_timestamp:
+                record_unique_datavalues_per_timestamp[rkey] = set()
+            if not skey in satellite_unique_datavalues_per_timestamp:
+                satellite_unique_datavalues_per_timestamp[skey] = set()
+            datavalue = ','.join([row[x] for x in datafields])
+            record_unique_datavalues_per_timestamp[rkey].add(datavalue)
+            satellite_unique_datavalues_per_timestamp[skey].add(datavalue)
+            
+
+    # report basic counts
+    num_rec = len(record_times_count.keys())
+    num_sat = len(satellite_times_count.keys())
+    print(f"Num unique record_times: {num_rec:,}")
+    print(f"Num unique satellite_times: {num_sat:,}")
+    print(f"Record_time field has {100*num_rec/float(num_sat)-100:0.2f}% more records.")
+
+    # report stats on key value repetitions
+    print()
+    print("Number of records found for each distinct timestamp")
+    print(f"Field Min#  Med#  Avg#  Max#")
+    minv,medv,avgv,maxv = number_profile(record_times_count.values())
+    print(f"RecTm {minv:0.1f}   {medv:0.1f}    {avgv:0.1f} {maxv:0.1f}")
+    minv,medv,avgv,maxv = number_profile(satellite_times_count.values())
+    print(f"SatTm {minv:0.1f}   {medv:0.1f}    {avgv:0.1f} {maxv:0.1f}")
+
+    # for each distinct timestamp, how many different values are assigned
+    print()
+    print("Number of distinct sensor values found for each distinct timestamp")
+    print(f"Field Min#  Med#  Avg#  Max#")
+    num_conflicts = [len(record_unique_datavalues_per_timestamp[x]) for x in record_unique_datavalues_per_timestamp]
+    minv,medv,avgv,maxv = number_profile(num_conflicts)
+    print(f"RecTm {minv:0.1f}   {medv:0.1f}    {avgv:0.1f} {maxv:0.1f}")
+    num_conflicts = [len(satellite_unique_datavalues_per_timestamp[x]) for x in satellite_unique_datavalues_per_timestamp]
+    minv,medv,avgv,maxv = number_profile(num_conflicts)
+    print(f"SatTm {minv:0.1f}   {medv:0.1f}    {avgv:0.1f} {maxv:0.1f}")
+
+def assess_accel_file(fname, datafields):
+    """
+    Load a CSV file and scan it for bloat signals.
+    """
+    record_times_count = {}
+    record_unique_datavalues_per_timestamp = {}
+
+    linecount = -1
+    with open(fname,'r') as fh:
+        for i,line in enumerate(fh):
+            pass
+        linecount = i+1
+
+    with open(fname, 'r') as fcsv:
+        reader = csv.DictReader(fcsv,delimiter=',')
+        for row in tqdm(reader,total=linecount):
+            user = row['user_id']
+            rec_time = row['record_time']
+            rkey = (user,rec_time)
+            record_times_count[rkey] = record_times_count.get(rkey, 0) + 1
+
+            # also keep a list of unique datavalues assigned to each timestamp
+            if not rkey in record_unique_datavalues_per_timestamp:
+                record_unique_datavalues_per_timestamp[rkey] = set()
+            datavalue = ','.join([row[x] for x in datafields])
+            record_unique_datavalues_per_timestamp[rkey].add(datavalue)
+            
+
+    # report basic counts
+    num_rec = len(record_times_count.keys())
+    print(f"Num unique record_times: {num_rec:,}")
+
+    # report stats on key value repetitions
+    print()
+    print("Number of records found for each distinct timestamp")
+    print(f"Field Min#  Med#  Avg#  Max#")
+    minv,medv,avgv,maxv = number_profile(record_times_count.values())
+    print(f"RecTm {minv:0.1f}   {medv:0.1f}    {avgv:0.1f} {maxv:0.1f}")
+
+    # for each distinct timestamp, how many different values are assigned
+    print()
+    print("Number of distinct sensor values found for each distinct timestamp")
+    print(f"Field Min#  Med#  Avg#  Max#")
+    num_conflicts = [len(record_unique_datavalues_per_timestamp[x]) for x in record_unique_datavalues_per_timestamp]
+    minv,medv,avgv,maxv = number_profile(num_conflicts)
+    print(f"RecTm {minv:0.1f}   {medv:0.1f}    {avgv:0.1f} {maxv:0.1f}")
+
+
+if __name__ == '__main__':
+    args = docopt(__doc__, version='0.1.1')
+
+    loglevel = "INFO"
+    csvfname = args['CSVFILE']
+
+    if "gps" in csvfname.lower():
+        datafields = ['lat','lon']
+        assess_gps_file(csvfname, datafields)
+    elif 'accel' in csvfname.lower():
+        datafields = ['x_axis','y_axis', 'z_axis']
+        assess_accel_file(csvfname, datafields)
+    else:
+        print("What kind of data is in this file? Aborting.")
+        exit()

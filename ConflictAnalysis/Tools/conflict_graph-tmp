@@ -1,0 +1,93 @@
+#!/usr/bin/env python
+import matplotlib.pyplot as plt
+import datetime
+import psycopg2
+import re
+import os
+import seaborn
+
+try:
+    db_host = os.environ["SQL_LOCAL_SERVER"]
+    db_host_port = int(os.environ["SQL_LOCAL_PORT"])
+    db_user = os.environ["SQL_USER"]
+    db_name = os.environ["SQL_DB"]
+    db_schema = os.environ["SQL_SCHEMA"]
+except KeyError as err:
+    print("A required runtime environment variable was not found.")
+    print(err)
+    print("Have you set up the run-time secrets?")
+    exit(1)
+
+user_spans_sql = """SELECT user_id, 
+                        --min(to_char(satellite_time, 'YYYY-MM-DD HH24:MI:SS.MS')) AS start, 
+                        --max(to_char(satellite_time, 'YYYY-MM-DD HH24:MI:SS.MS')) AS end 
+                        min(satellite_time) AS start, 
+                        max(satellite_time) AS end 
+                    FROM level_0.tmpssk_gps_conflicts 
+                    --WHERE user_id > 5458 and user_id < 5465
+                    GROUP BY user_id;
+                    """
+
+telemetry_sql = """
+    SELECT satellite_time , numconflicts
+    --SELECT satellite_time , totrecs
+    FROM level_0.tmpssk_gps_conflicts
+    WHERE user_id = %s
+    ORDER BY satellite_time;
+"""
+
+print("Creating connection to DB...")
+with psycopg2.connect(user=db_user,
+                    host=db_host,
+                    port=db_host_port,
+                    database=db_name) as conn:
+
+    print("Getting user list...")
+    cur = conn.cursor()
+    cur.execute(user_spans_sql)
+    users = cur.fetchall()
+    print(f"Unique users = {users}")
+
+    numfigs = len(users)
+    f = plt.figure(figsize=(12,2*numfigs))
+    f.suptitle("Num Distinct Conflict Groups per Timestamp - GPS")
+    # f.suptitle("Num Samples per Timestamp - GPS")
+
+    for i,(user,start,end) in enumerate(users):
+        print(f"Reading SQL data for user {user}...")
+        cur.execute(telemetry_sql%user)
+        sparse_collision_counts = cur.fetchall()
+
+        full_collision_counts = [] 
+        last_timestamp = sparse_collision_counts[0][0]
+        # now march through each sequential pair of samples
+        # and if there are gaps between them with missing
+        # seconds, insert additional samples with 0 collisions
+        print(f"Reindexing data...")
+        for sparse_collision in sparse_collision_counts:
+            sample_time = sparse_collision[0]
+            if sample_time - last_timestamp > datetime.timedelta(seconds = 2):
+                # add one new record just after previous 
+                t = last_timestamp + datetime.timedelta(seconds=1)
+                full_collision_counts.append( (t, 0) )
+                # and another just before current
+                t = sample_time - datetime.timedelta(seconds=1)
+                full_collision_counts.append( (t, 0) )
+
+            full_collision_counts.append(sparse_collision)
+            last_timestamp = sample_time
+
+        print(f"Found {len(sparse_collision_counts)} samples in DB.")
+        print(f"Now {len(full_collision_counts)} samples in full set.")
+
+
+        print(f"Generating plot...")
+        # ax = f.add_subplot(int(f"{numfigs}1{i+1}"))
+        ax = f.add_subplot(numfigs,1,i+1)
+        ax.plot(*zip(*full_collision_counts))
+        ax.set_ylabel(f"User {user}")
+        # df.plot(figsize=(12,3))
+        # fname = f"plot-{user}.png"
+        # print(f"Saving {fname}...")
+    f.savefig("collisions_gps.png",dpi=90)
+    print("Done.")

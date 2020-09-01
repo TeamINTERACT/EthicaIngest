@@ -1,0 +1,150 @@
+#!/usr/bin/env python
+import matplotlib as mat
+import matplotlib.pyplot as plt
+import random as rnd
+import datetime
+import psycopg2
+import psycopg2.extras
+import re
+import os
+import seaborn
+import collections
+from loguru import logger as log
+import math
+
+"""
+Draws a graph showing the distribution of timestamps relative to
+minutes of the hour. If Kevin is correct about the tendency to
+align to the clock on the even 5 minute intervals, this should
+show up in the graph.
+
+Adding 30s to each timestamp first, so that the min number can be
+taken directly.
+"""
+
+try:
+    db_host = os.environ["SQL_LOCAL_SERVER"]
+    db_host_port = int(os.environ["SQL_LOCAL_PORT"])
+    db_user = os.environ["SQL_USER"]
+    db_name = os.environ["SQL_DB"]
+    db_schema = os.environ["SQL_SCHEMA"]
+except KeyError as err:
+    log.error("A required runtime environment variable was not found.")
+    log.error(err)
+    log.error("Have you set up the run-time secrets?")
+    exit(1)
+
+# SQL commands for getting data out of the tables of interest
+user_dc_signals_sql = """SELECT count(1), user_id, record_time
+                         FROM level_0.tmpelemetrysskwbatterycsv
+                         GROUP BY user_id, record_time
+                         ORDER BY user_id, record_time;
+                         """
+user_gps_signals_sql = """SELECT count(1), user_id, record_time
+                         FROM level_0.tmpelemetrysskwgpscsv
+                         GROUP BY user_id, record_time
+                         ORDER BY user_id, record_time;
+                         """
+user_accel_signals_sql = """SELECT user_id, record_time
+                         FROM level_0.tmpelemetrysskwaccelcsv
+                         ORDER BY user_id, record_time;
+                         """
+
+sample_offsets_sql = """
+    SELECT record_time
+    FROM level_0.tmpelemetrysskwaccelcsv
+    WHERE user_id = %s
+    ORDER BY user_id, record_time;
+"""
+
+
+log.info("Creating connection to DB...")
+with psycopg2.connect(user=db_user,
+                    host=db_host,
+                    port=db_host_port,
+                    database=db_name) as conn:
+
+    log.info("Getting user list...")
+    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    # cur.execute(user_dc_signals_sql)
+    cur.execute(user_gps_signals_sql)
+    gps_signals = cur.fetchall()
+    users = set([x['user_id'] for x in gps_signals])
+    # log.info(f"Unique users = {users}")
+
+    cur.execute(user_dc_signals_sql)
+    dc_signals = cur.fetchall()
+
+    # numfigs = len(users)
+    numfigs = 1
+    numusers = len(users) #10
+    numgraphs = 5
+    f, axs = plt.subplots(numgraphs,1,figsize=(8,3*numgraphs))
+    f.suptitle("Ethica GPS/Battery Timestamp Minute Alignments (Saskatoon)")
+
+    ticks = list(range(0,60))
+    ticklabels = [str(x) for x in ticks]
+
+    i = 0
+    rnd.seed(17) # ensure same group of users chosen each time
+    bins = list(range(0,61))
+    # master_minutes = []
+    graph_users = rnd.sample(users,numgraphs)
+    for user in graph_users:
+        user_gps_signals = [x['record_time'] for x in gps_signals if x['user_id'] == user]
+        log.info(f"Found {len(user_gps_signals)} GPS signals for user {user}")
+
+        gps_minutes = []
+        for timestamp in user_gps_signals:
+            # clockmin = (timestamp + datetime.timedelta(seconds=30)).minute 
+            clockmin = timestamp.minute 
+            gps_minutes.append( clockmin )
+
+        user_dc_signals = [x['record_time'] for x in dc_signals if x['user_id'] == user]
+        log.info(f"Found {len(user_dc_signals)} DC signals for user {user}")
+
+        dc_minutes = []
+        for timestamp in user_dc_signals:
+            # clockmin = (timestamp + datetime.timedelta(seconds=30)).minute 
+            clockmin = timestamp.minute 
+            dc_minutes.append( clockmin )
+
+        # log.info(f"Signals sample -> {user_signals[-5:]}")
+        # log.info(f"Spacings sample -> {user_spacings[-5:]}")
+
+
+        # histcount = collections.Counter(user_spacings[1:])
+        # good = histcount[5]
+        # rate = 100*good/(float(len(user_spacings)))
+        # log.error(f"{user}, {good}, {rate:0.1f}")
+        # # log.info(f"User {user} has {good} 5-min signals, which is about {rate:0.1f}% clean.")
+
+        # plot histogram of minute values
+        # ax.set_xscale('log')
+        # ax.set_yscale('log')
+        # ax.get_xaxis().get_major_formatter().labelOnlyBase = False
+        if user in graph_users:
+            log.info(f"Generating plot...")
+            axs[i].hist(gps_minutes, bins=bins, alpha=0.5, width=0.3, label='GPS')
+            axs[i].hist(dc_minutes, bins=bins, alpha=0.5, width=0.3, label="Battery")
+            axs[i].legend(loc='upper right')
+            axs[i].set_xlabel(f'Timestamps binned by clock minute (user {user}) GPSSamps({len(gps_minutes):,}) BatSamps({len(dc_minutes):,})',fontsize=6)
+            axs[i].set_ylabel('Number of Stamps',fontsize=6)
+            # axs[i].set_yscale('log')
+            # axs[i].get_yaxis().get_major_formatter().labelOnlyBase = False
+            axs[i].tick_params(axis='both', which='major', labelsize=6)
+            axs[i].tick_params(axis='both', which='minor', labelsize=4)
+            axs[i].set_xticks(ticks[::5])
+            axs[i].set_xticklabels(ticklabels[::5])
+            i += 1
+
+    # bins = list(range(0,60))
+    # axs[i].hist(master_minutes, bins=bins, width=0.3)
+    # axs[i].set_xlabel(f'Stamps per Clock Minute for All {len(users)} Users',fontsize=6)
+    # axs[i].set_ylabel('Number of Stamps',fontsize=6)
+    # axs[i].tick_params(axis='both', which='major', labelsize=6)
+    # axs[i].tick_params(axis='both', which='minor', labelsize=4)
+
+    fname = "Outputs/min-hist-gpsbatx5.png"
+    f.savefig(fname,dpi=100)
+    log.info(f"Done. Image in {fname}")

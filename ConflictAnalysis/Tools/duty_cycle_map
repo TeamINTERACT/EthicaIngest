@@ -1,0 +1,138 @@
+#!/usr/bin/env python
+import matplotlib as mat
+import matplotlib.pyplot as plt
+import random as rnd
+import datetime
+import psycopg2
+import psycopg2.extras
+import re
+import os
+import seaborn
+import collections
+from loguru import logger as log
+import math
+
+"""
+Draws a graph showing the distribution of timestamps relative to
+the duty cycle.
+
+Taking the battery table as the duty cycle clock, convert the
+timestamps in the accel and gps tables into DC-relative time
+offsets and draw a graph of those values.
+
+For each user, draw two graphs:
+    GRAPH 1: histograms of seconds offset between DC signals 
+    GRAPH 2: histogram of seconds offset btwn record_time and most recent DC signal
+"""
+
+try:
+    db_host = os.environ["SQL_LOCAL_SERVER"]
+    db_host_port = int(os.environ["SQL_LOCAL_PORT"])
+    db_user = os.environ["SQL_USER"]
+    db_name = os.environ["SQL_DB"]
+    db_schema = os.environ["SQL_SCHEMA"]
+except KeyError as err:
+    log.error("A required runtime environment variable was not found.")
+    log.error(err)
+    log.error("Have you set up the run-time secrets?")
+    exit(1)
+
+# SQL commands for getting data out of the tables of interest
+user_dc_signals_sql = """SELECT user_id, record_time
+                         FROM level_0.tmpelemetrysskwbatterycsv
+                         ORDER BY user_id, record_time;
+                         """
+
+sample_offsets_sql = """
+    SELECT record_time
+    FROM level_0.tmpelemetrysskwaccelcsv
+    WHERE user_id = %s
+    ORDER BY user_id, record_time;
+"""
+
+def compute_spacing(timestamps):
+    """
+    Given a series of timestamps, return a list of ms offsets
+    between successive entries in the series.
+    Assumes the timestamps are sorted in ascending order
+    """
+    last = None
+    minute_spaces = []
+    for this in timestamps:
+        if this and last:
+            interval = this - last
+            # diff_ms = int(interval.total_seconds()*1000)
+            diff_s = interval.total_seconds()
+            minute_spaces.append( int(round(diff_s/60.0, 0)) )
+        else:
+            minute_spaces.append(-1)
+        last = this
+    return minute_spaces
+
+log.add('duty_cycle.csv', level='ERROR')
+
+log.info("Creating connection to DB...")
+with psycopg2.connect(user=db_user,
+                    host=db_host,
+                    port=db_host_port,
+                    database=db_name) as conn:
+
+    log.info("Getting user list...")
+    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    cur.execute(user_dc_signals_sql) #"SELECT DISTINCT user_id FROM level_0.tmpelemetrysskwbatterycsv;")
+    all_signals = cur.fetchall()
+    users = set([x['user_id'] for x in all_signals])
+    # log.info(f"Unique users = {users}")
+
+    # numfigs = len(users)
+    numfigs = 1
+    numusers = len(users) #10
+    f, axs = plt.subplots(numusers,2,figsize=(16,4*numusers))
+    f.suptitle("Ethica Battery Duty Cycle Intervals (Saskatoon)")
+
+    rnd.seed(17) # ensure same group of users chosen each time
+    for i,user in enumerate(rnd.sample(users,numusers)):
+    # for i,user in enumerate(users):
+        log.info(f"Drawing signal spacing histogram...")
+        user_signals = [x['record_time'] for x in all_signals if x['user_id'] == user]
+        log.info(f"Found {len(user_signals)} signals for user {user}")
+        user_spacings = compute_spacing(user_signals)
+        log.info(f"Found {len(user_spacings)} spacings for user {user}")
+
+        # log.info(f"Signals sample -> {user_signals[-5:]}")
+        # log.info(f"Spacings sample -> {user_spacings[-5:]}")
+
+        log.info(f"Generating plots...")
+
+        # plot each DC trigger showing offset since previous trigger
+        # drop the first sample, since it is known to have no prior time
+        # logarithmic vertical axis
+        axs[i,0].set_yscale('log')
+        axs[i,0].bar(user_signals[1:], user_spacings[1:], width=0.1)
+        axs[i,0].set_xlabel(f'{len(user_signals)} Timestamps for User {user}',fontsize=6)
+        axs[i,0].set_ylabel(f'Offset From Previous DC Start (minutes)',fontsize=6)
+        axs[i,0].tick_params(axis='both', which='major', labelsize=6)
+        axs[i,0].tick_params(axis='both', which='minor', labelsize=4)
+
+        histcount = collections.Counter(user_spacings[1:])
+        good = histcount[5]
+        rate = 100*good/(float(len(user_spacings)))
+        log.error(f"{user}, {good}, {rate:0.1f}")
+        # log.info(f"User {user} has {good} 5-min signals, which is about {rate:0.1f}% clean.")
+
+        # plot histogram of offsets
+        # logarithmic vertical axis
+        bins = [0,1,2,3,4,5,6,7,8,9,10,100,1000,10000,100000]
+        axs[i,1].set_xscale('log')
+        axs[i,1].set_yscale('log')
+        axs[i,1].get_xaxis().get_major_formatter().labelOnlyBase = False
+        axs[i,1].hist(user_spacings[1:], bins=bins)
+        axs[i,1].set_xlabel(f'Offset (minutes) for User {user} ({rate:0.1f}% clean)',fontsize=6)
+        axs[i,1].set_ylabel('Number of Occurrences',fontsize=6)
+        axs[i,1].tick_params(axis='both', which='major', labelsize=6)
+        axs[i,1].tick_params(axis='both', which='minor', labelsize=4)
+
+
+    fname = "offset-hist-all.png"
+    f.savefig(fname,dpi=10)
+    log.info(f"Done. Image in {fname}")
