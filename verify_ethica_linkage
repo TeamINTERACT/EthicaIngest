@@ -18,6 +18,7 @@ Options:
     -h            Display this help info
     -p            Show progress bar
     -t ID         Produce trace log of all decisions about user #ID
+    -i A,B...     Ignore telemetry data from Ethica ids A, B, ...
     -v,--verbose  Provide more verbose output
 """
 import os
@@ -169,13 +170,13 @@ def detect_missing_values(master_values, csvfile, colname, streamname):
         log.error(f"{len(missing_values)} expected {colname} values missing from {streamname} data")
         log.error(','.join([str(x) for x in sorted(list(missing_values))]))
     else:
-        log.info(f"All expected {colname} values found for {streamname}")
+        log.warning(f"All expected {colname} values found for {streamname}")
     unexpected_values = found_values - master_values
     if unexpected_values: # filter E
         log.error(f"{len(unexpected_values)} {colname} values in {streamname} data were unexpected:")
         log.error(','.join([str(x) for x in sorted(list(unexpected_values))]))
     else:
-        log.info(f"All values found for {colname} in {streamname} were expected")
+        log.warning(f"All values found for {colname} in {streamname} were expected")
 
 
 if __name__ == '__main__':
@@ -184,6 +185,7 @@ if __name__ == '__main__':
     linkage_filename = args['LINKAGECSV']
     gps_filename = args['GPSCSV']
     accel_filename = args['ACCELCSV']
+    ignorables = set([])
 
     # replace default logger with something cleaner
     log.remove()
@@ -200,6 +202,11 @@ if __name__ == '__main__':
     log.info(f"Execution directory: {os.getcwd()}")
     log.info(f"Command line args: {args}")
 
+    if args['-i']:
+        idlist = args['-i']
+        ignorables = set([x.strip() for x in idlist.split(',')])
+        log.warning(f"Ignoring telemetry data from Ethica IDs {ignorables}")
+
     # parse the linkage file and validate key data fields
     with open(linkage_filename,'r',encoding='ISO-8859-1') as fcsv:
         reader = csv.DictReader(fcsv,delimiter=',')
@@ -213,17 +220,21 @@ if __name__ == '__main__':
                 continue # not an ethica row
             if 'data_disposition' in row.keys() \
             and 'ignore' in row['data_disposition']:
-                log.info(f"Ignoring record for ethica user {eid}, as instructed")
+                log.warning(f"Ignoring record for ethica user {eid}, as instructed")
                 continue 
             if not validate_eid(eid):
                 continue # we're only interested in ethica users
             iid = row['interact_id']
             if not iid or not validate_iid(iid): # filter C 
                 log.error(f"Ethica user {eid} has no iid")
-    log.info(f"There were {len(eids)} Ethica users mentioned in linkage file.")
+    log.warning(f"There were {len(eids)} Ethica users mentioned in linkage file.")
+
+    # add the ignorables to the eids so that they will not be
+    # reported as unexpected
+    eids = eids.union(ignorables)
 
     # find and report abnormalities in the data
     detect_missing_values(eids, gps_filename, 'user_id', 'GPS')
-    # detect_missing_values(eids, accel_filename, 'user_id', 'Accel')
+    detect_missing_values(eids, accel_filename, 'user_id', 'Accel')
 
-    log.info("Verification complete.")
+    log.warning("Verification complete.")
