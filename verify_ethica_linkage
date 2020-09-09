@@ -16,6 +16,7 @@ Usage:
 
 Options:
     -h            Display this help info
+    -p            Show progress bar
     -t ID         Produce trace log of all decisions about user #ID
     -v,--verbose  Provide more verbose output
 """
@@ -146,8 +147,13 @@ def get_possible_values_from_csv(filename, colname):
     nlines = sum(1 for x in open(filename))
     with open(filename,'r',encoding='ISO-8859-1') as fcsv:
         reader = csv.DictReader(fcsv,delimiter=',')
-        for row in tqdm(reader, total=nlines):
-            values.add(row[colname])
+        if args['-p']:
+            print(f"Scanning file: {filename}")
+            for row in tqdm(reader, total=nlines):
+                values.add(row[colname])
+        else:
+            for row in reader:
+                values.add(row[colname])
     return values
 
 
