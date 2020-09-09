@@ -211,6 +211,10 @@ if __name__ == '__main__':
             if not eid: 
                 log.info(f"CSV row #{rownum} has no eid")
                 continue # not an ethica row
+            if 'data_disposition' in row.keys() \
+            and 'ignore' in row['data_disposition']:
+                log.info(f"Ignoring record for ethica user {eid}, as instructed")
+                continue 
             if not validate_eid(eid):
                 continue # we're only interested in ethica users
             iid = row['interact_id']
@@ -220,6 +224,6 @@ if __name__ == '__main__':
 
     # find and report abnormalities in the data
     detect_missing_values(eids, gps_filename, 'user_id', 'GPS')
-    detect_missing_values(eids, accel_filename, 'user_id', 'Accel')
+    # detect_missing_values(eids, accel_filename, 'user_id', 'Accel')
 
     log.info("Verification complete.")
