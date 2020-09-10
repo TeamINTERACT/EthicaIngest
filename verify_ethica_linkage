@@ -218,10 +218,14 @@ if __name__ == '__main__':
             if not eid: 
                 log.info(f"CSV row #{rownum} has no eid")
                 continue # not an ethica row
-            if 'data_disposition' in row.keys() \
-            and 'ignore' in row['data_disposition']:
-                log.warning(f"Ignoring record for ethica user {eid}, as instructed")
-                continue 
+            if 'data_disposition' in row.keys():
+                if 'ignore' in row['data_disposition']:
+                    log.warning(f"Ignoring record for ethica user {eid}, as instructed by linkage record")
+                    continue 
+                if 'cull' in row['data_disposition']:
+                    log.warning(f"Culling telemetry data from ethica user {eid}, as instructed by linkage record")
+                    # We leave the eid in the list, so that it will not show up as an unexpected id, 
+                    # but we also alert the operator that telemetry from this eid will  be culled at ingest time
             if not validate_eid(eid):
                 continue # we're only interested in ethica users
             iid = row['interact_id']
